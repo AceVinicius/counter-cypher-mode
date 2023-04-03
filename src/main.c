@@ -18,23 +18,24 @@
 #define  MIN_TO_OMP       65536
 
 
-void *     allocate                   (size_t count, size_t size);
-FILE *     open_file                  (const char *filename, const char *mode);
-uint8_t ** allocate_blocks            (size_t number_of_blocks);
-void       deallocate_blocks          (uint8_t **blocks, int number_of_blocks);
-off_t      get_file_size              (const char *filename);
-int        calculate_number_of_blocks (int size, uint8_t last_block_size);
-uint8_t *  generate_nonce_block       (uint8_t *block);
-uint8_t *  extract_nonce_from_block   (uint8_t *block);
-void       insert_padding_into_block  (uint8_t *block, uint8_t last_block_size);
-uint8_t    extract_last_block_size    (uint8_t *block);
-uint8_t ** read_file_into_blocks      (uint8_t **blocks, int number_of_blocks, const char *filename, uint8_t last_block_size);
-void       write_blocks_into_file     (uint8_t **blocks, int number_of_blocks, const char *filename, uint8_t last_block_size);
-void       xor                        (uint8_t *op1, const uint8_t *op2, uint8_t size);
-void       mix_nonce_and_counter      (const uint8_t *nonce, long long counter, uint8_t *output);
-void       encrypt_block              (const uint8_t *key, const uint8_t *nonce, long long counter, uint8_t *block);
-void       ctr_encrypt                (const char *input, const char *output, const uint8_t *key);
-void       ctr_decrypt                (const char *input, const char *output, const uint8_t *key);
+void *           allocate                        (size_t count, size_t size);
+FILE *           open_file                       (const char *filename, const char *mode);
+uint8_t **       allocate_blocks                 (size_t number_of_blocks);
+void             deallocate_blocks               (uint8_t **blocks, int number_of_blocks);
+off_t            get_file_size                   (const char *filename);
+int              calculate_number_of_blocks      (int size, uint8_t last_block_size);
+uint8_t *        generate_nonce_block            (uint8_t *block);
+uint8_t *        extract_nonce_from_block        (uint8_t *block);
+void             insert_padding_into_block       (uint8_t *block, uint8_t last_block_size);
+uint8_t          extract_last_block_size         (uint8_t *block);
+uint8_t **       read_file_into_blocks           (uint8_t **blocks, int number_of_blocks, const char *filename, uint8_t last_block_size);
+void             write_blocks_into_file          (uint8_t **blocks, int number_of_blocks, const char *filename, uint8_t last_block_size);
+void             xor                             (uint8_t *op1, const uint8_t *op2, uint8_t size);
+void             mix_nonce_and_counter           (const uint8_t *nonce, long long counter, uint8_t *output);
+void             encrypt_block                   (const struct AES_ctx *context, const uint8_t *nonce, long long counter, uint8_t *block);
+void             ctr_encrypt                     (const char *input, const char *output, const struct AES_ctx *context);
+void             ctr_decrypt                     (const char *input, const char *output, const struct AES_ctx *context);
+struct AES_ctx * generate_context_from_input_key (void);
 
 
 void *allocate(const size_t count, const size_t size) {
@@ -231,20 +232,18 @@ void mix_nonce_and_counter(const uint8_t *const nonce, const long long counter, 
 }
 
 
-void encrypt_block(const uint8_t *const key, const uint8_t *const nonce, const long long counter, uint8_t *const block) {
-    uint8_t *input_aes = (uint8_t *) allocate(BLOCK_SIZE, sizeof(uint8_t));
-    uint8_t *output_aes = (uint8_t *) allocate(BLOCK_SIZE, sizeof(uint8_t));
+void encrypt_block(const struct AES_ctx *const context, const uint8_t *const nonce, const long long counter, uint8_t *const block) {
+    uint8_t *buffer = (uint8_t *) allocate(BLOCK_SIZE, sizeof(uint8_t));
 
-    mix_nonce_and_counter(nonce, counter, input_aes);
-    AES128_Encrypt(input_aes, key, output_aes);
-    xor(block, output_aes, BLOCK_SIZE);
+    mix_nonce_and_counter(nonce, counter, buffer);
+    AES_ECB_encrypt(context, buffer);
+    xor(block, buffer, BLOCK_SIZE);
 
-    free(input_aes);
-    free(output_aes);
+    free(buffer);
 }
 
 
-void ctr_encrypt(const char *const input, const char *const output, const uint8_t *const key) {
+void ctr_encrypt(const char *const input, const char *const output, const struct AES_ctx *const context) {
     const int file_size = (int) get_file_size(input);
     const uint8_t last_block_size = file_size % BLOCK_SIZE;
     const int number_of_blocks = calculate_number_of_blocks(file_size, last_block_size);
@@ -255,9 +254,9 @@ void ctr_encrypt(const char *const input, const char *const output, const uint8_
 
     uint8_t *const nonce = (uint8_t *) generate_nonce_block(blocks[ number_of_blocks ]);
 
-    #pragma omp parallel for shared(number_of_blocks, key, nonce, blocks) default(none) if(number_of_blocks > MIN_TO_OMP)
+    #pragma omp parallel for shared(number_of_blocks, nonce, blocks, context) default(none) if(number_of_blocks > MIN_TO_OMP)
     for (long long i = 0; i < number_of_blocks; ++i) {
-        encrypt_block(key, nonce, i, blocks[ i ]);
+        encrypt_block(context, nonce, i, blocks[ i ]);
     }
 
     write_blocks_into_file(blocks, number_of_blocks + 1, output, BLOCK_SIZE);
@@ -269,7 +268,7 @@ void ctr_encrypt(const char *const input, const char *const output, const uint8_
 }
 
 
-void ctr_decrypt(const char *const input, const char *const output, const uint8_t *const key) {
+void ctr_decrypt(const char *const input, const char *const output, const struct AES_ctx *const context) {
     const int file_size = (int) get_file_size(input);
     const int number_of_blocks = calculate_number_of_blocks(file_size, BLOCK_SIZE) - 1;
 
@@ -278,9 +277,9 @@ void ctr_decrypt(const char *const input, const char *const output, const uint8_
 
     uint8_t *const nonce = (uint8_t *) extract_nonce_from_block(blocks[ number_of_blocks ]);
 
-    #pragma omp parallel for shared(number_of_blocks, key, nonce, blocks) default(none) if(number_of_blocks > MIN_TO_OMP)
+    #pragma omp parallel for shared(number_of_blocks, nonce, blocks, context) default(none) if(number_of_blocks > MIN_TO_OMP)
     for (int i = 0; i < number_of_blocks; ++i) {
-        encrypt_block(key, nonce, i, blocks[ i ]);
+        encrypt_block(context, nonce, i, blocks[ i ]);
     }
 
     const uint8_t last_block_size = extract_last_block_size(blocks[ number_of_blocks - 1 ]);
@@ -293,34 +292,48 @@ void ctr_decrypt(const char *const input, const char *const output, const uint8_
 }
 
 
+struct AES_ctx *generate_context_from_input_key(void) {
+    uint8_t *key = allocate(BLOCK_SIZE, sizeof(uint8_t));
+
+    char *input_key = getpass("\n Enter your key (128 bits): ");
+    memcpy(key, input_key, strnlen(input_key, BLOCK_SIZE));
+
+    struct AES_ctx *new_context = allocate(1, sizeof(struct AES_ctx));
+    AES_init_ctx(new_context, key);
+
+    free(input_key);
+    free(key);
+
+    return new_context;
+}
+
+
 int main(const int argc, const char ** const argv) {
     if (argc != NUM_OF_ARGS) {
         fprintf(stderr, "usage: %s [enc|dec] [in file] [out file]\n", argv[ EXEC_NAME_IDX ]);
         return EXIT_FAILURE;
     }
 
-    uint8_t *key = (uint8_t *) allocate(BLOCK_SIZE, sizeof(uint8_t));
-
     printf("\n  mode: CTR\n");
     printf("  padding: ANSI X.923\n");
-    printf("\n Enter your key (128 bits): ");
-    fgets((char *) key, BLOCK_SIZE, stdin);
+
+    struct AES_ctx *const context = generate_context_from_input_key();
 
     double time_start = omp_get_wtime();
 
     if (strcmp("enc", argv[ MODE_IDX ]) == 0) {
-        ctr_encrypt(argv[ INPUT_FILE_IDX ], argv[ OUTPUT_FILE_IDX ], key);
+        ctr_encrypt(argv[ INPUT_FILE_IDX ], argv[ OUTPUT_FILE_IDX ], context);
     } else if (strcmp("dec", argv[ MODE_IDX ]) == 0) {
-        ctr_decrypt(argv[ INPUT_FILE_IDX ], argv[ OUTPUT_FILE_IDX ], key);
+        ctr_decrypt(argv[ INPUT_FILE_IDX ], argv[ OUTPUT_FILE_IDX ], context);
     } else {
-        free(key);
+        free(context);
         fprintf(stderr, "usage: %s [enc|dec] [in file] [out file]\n", argv[ EXEC_NAME_IDX ]);
         return EXIT_FAILURE;
     }
 
     printf("\n  time: %lf seconds\n\n", omp_get_wtime() - time_start);
 
-    free(key);
+    free(context);
 
     return EXIT_SUCCESS;
 }
